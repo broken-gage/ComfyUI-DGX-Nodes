@@ -1,0 +1,4 @@
+# Direct state-dict loading in the DGX loaders uses safetensors explicitly.
+# ComfyUI often already installs this, but the DGX repo now declares it
+# directly so the standalone package has a complete dependency surface.
+safetensors>=0.4.0

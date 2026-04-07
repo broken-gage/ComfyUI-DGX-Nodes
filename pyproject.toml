@@ -1,0 +1,25 @@
+[project]
+name = "dgx-gb10-nodes"
+description = "Experimental unified-memory-aware DGX Spark / GB10 loader nodes for ComfyUI"
+version = "1.0.0"
+license = { file = "LICENSE" }
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "safetensors>=0.4.0",
+]
+classifiers = [
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Environment :: GPU :: NVIDIA CUDA",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Programming Language :: Python :: 3",
+]
+
+[project.urls]
+Repository = "https://github.com/broken-gage/ComfyUI-DGX-Nodes"
+"Bug Tracker" = "https://github.com/broken-gage/ComfyUI-DGX-Nodes/issues"
+
+[tool.comfy]
+PublisherId = "broken-gage"
+DisplayName = "DGX Nodes"
