@@ -1,6 +1,8 @@
 # ComfyUI-DGX-Nodes
 
-Version: 1.0.0
+Version: 1.1.0
+
+Release Date: 2026-04-11
 
 
 ## Author
@@ -14,7 +16,21 @@ Author/Maintainer: Claude Code / CodeX
 
 Standalone DGX Spark / GB10 focused custom nodes for ComfyUI.
 
-This repo contains experimental unified-memory-aware loader nodes that can load checkpoints, UNETs, CLIP encoders, CLIP vision models, dual-CLIP pairs, and VAEs through a DGX-oriented direct-to-CUDA path. The same nodes also support a stock ComfyUI fallback path through the `dgx_mode` toggle.
+This repo contains experimental unified-memory-aware loader nodes that can load checkpoints, UNETs, CLIP encoders, CLIP vision models, dual-CLIP pairs, VAEs, and upscaler models through a DGX-oriented direct-to-CUDA path. The same nodes also support a stock ComfyUI fallback path through the `dgx_mode` toggle.
+
+Version `1.1.0` adds:
+
+- `UpscaleModelLoaderDGX`
+- backend-aware safetensors loading with `instanttensor`, `fastsafetensors`, and plain `safetensors`
+- stock fallback for unsupported upscaler formats such as `.pth`
+
+The current backend order is:
+
+- `instanttensor`
+- `fastsafetensors`
+- plain `safetensors`
+
+The `instanttensor` pipeline is currently a work in progress and experimental. It is wired into the node package, but it still needs more validation and stabilization on real large-model workloads. It is highly recommended to select `fastsafetensors` when using a DGX Spark / GB10 system.
 
 
 ## Included Nodes
@@ -25,6 +41,7 @@ This repo contains experimental unified-memory-aware loader nodes that can load 
 - `DualCLIPLoaderDGX`
 - `CLIPVisionLoaderDGX`
 - `VAELoaderDGX`
+- `UpscaleModelLoaderDGX`
 
 
 ## License
@@ -54,26 +71,37 @@ ComfyUI.
 Test conditions:
 - Clean reboot before switching mode.
 - ComfyUI flags: `--gpu-only`, `--cache-none`, `--disable-async-offload`
+- Image edit, 1024 x 1024
+- UNET, CLIP, and VAE nodes are replaced with DGX Nodes
 
-### Flux.2 Klein 9B Base Image Edit + Turbo 8-step LoRA
-
-| Mode | 1st run | 2nd run | 3rd run | 4th run |
-| --- | ---: | ---: | ---: | ---: |
-| ComfyUI Native | 172.30s | 55.14s | 55.61s | 56.10s |
-| DGX Mode ON | 219.10s | 55.85s | 55.55s | 56.17s |
-| DGX Mode OFF | 89.04s | 55.46s | 54.66s | 54.49s |
-
-### Flux.2 Dev FP8 + 8-step Turbo LoRA
+### Flux.2 Dev FP8 Mixed - Single Image Edit + 8-step Turbo LoRA - Ver 1.1.0
 
 | Mode | 1st run | 2nd run | 3rd run | 4th run |
 | --- | ---: | ---: | ---: | ---: |
-| ComfyUI Native | 462.54s | 62.79s | 24.99s | 29.41s |
-| DGX Mode ON | 483.74s | 21.20s | 21.21s | 21.22s |
-| DGX Mode OFF | 607.00s | 70.10s | 24.65s | 21.24s |
+| ComfyUI Native\* | 756.47s | 141.57s | 114.50s | 99.44s |
+| fastsafetensors | 214.19s | 99.06s | 99.27s | 99.27s |
+
+\* Model loading and inference performance may be affected by RAM double loading, which caused spill to swap and affected test results.
+
+### Flux.2 Klein 9B Base FP8 - Single Image Edit + 8-step Turbo LoRA - Ver 1.1.0
+
+| Mode | 1st run | 2nd run | 3rd run | 4th run |
+| --- | ---: | ---: | ---: | ---: |
+| ComfyUI Native | 217.91s | 31.86s | 31.88s | 31.88s |
+| fastsafetensors | 55.84s | 31.82s | 31.80s | 31.78s |
+
 
 ### Short Conclusion
 
-Results are workload-dependent. In these tests, DGX Mode ON generally had a slower 1st run, but it could improve repeated-run generation speed on some workloads. The benefit is not universal and varies by model and workflow.
+The `fastsafetensors` pipeline is now able to load models directly to VRAM, bypassing the CPU/RAM staging process. However, the improvement in overall inference time is workload-dependent. While some workloads benefit from shorter model load time, other workloads may experience a slowdown in load time and inference time depending on the nature of the downstream nodes and pipelines.
+
+| Workflow Model | Execution Time Improvement |
+| --- |  ---: |
+| Flux.2-Dev FP8 Mixed | Positive |
+| Flux.2-Klein 9B Base | Positive |
+| Qwen-Image-Edit (2511) | Positive |
+| WAN 2.2 T2V 14B | Negative |
+| WAN 2.2 I2V 14B | Negative |
 
 
 ## Installation
@@ -95,9 +123,26 @@ No ComfyUI core-file modifications are required.
   Falls back to the stock ComfyUI loading path. This keeps the same workflow
   node identities usable on non-DGX systems, including x86 platforms.
 
+- `storage_backend=auto`
+  (Experimental) Tries the DGX backend stack in order and falls back safely when a higher-performance backend is unavailable or unsuitable.
+
+- `storage_backend=instanttensor`
+  (Experimental) Uses the `instanttensor` loader path for safetensors files. This path is currently experimental and should be treated as work in progress.
+
+- `storage_backend=fastsafetensors`
+  Uses `fastsafetensors` for safetensors files. On GB10 this is currently integrated in no-GDS mode by default because the library's built-in GDS platform detection does not currently line up with this machine.
+
+- `storage_backend=safetensors`
+  Uses the existing plain `safetensors.safe_open(...)` direct-to-CUDA path.
+
+- `Upscale Model Loader (Unified Memory)`
+  Mirrors stock `Load Upscale Model`. Safetensors upscaler models use the DGX backend stack when possible; unsupported formats such as `.pth` automatically fall back to the conventional ComfyUI loader.
+
 ## Platform Notes
 
 - DGX mode is designed for NVIDIA DGX Spark / GB10 systems.
+- GDS-capable user-space/runtime components are present on the target GB10 platform, but individual third-party loader libraries can still need backend-specific handling or safe fallback on this stack.
+- The `instanttensor` backend is currently integrated as an experimental path and may still require additional tuning or fallback on large-model workloads.
 - Fallback mode is intended to remain usable on non-DGX systems, including:
   - Windows x86
   - Ubuntu x86

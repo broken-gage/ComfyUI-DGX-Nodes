@@ -16,12 +16,13 @@ import torch
 
 from .performance_metrics import node_timer
 from .common import (
-    cuda_device_list,
+    cuda_device_input,
     dgx_mode_input,
     ensure_safetensors_file,
     force_assign_core_model_patcher,
     load_safetensors_state_dict,
     require_cuda_for_dgx_mode,
+    storage_backend_input,
 )
 
 logger = logging.getLogger(__name__)
@@ -34,7 +35,7 @@ def _load_vae_stock(vae_path):
     return vae
 
 
-def _load_vae_direct(vae_path, device="cuda:0"):
+def _load_vae_direct(vae_path, device="cuda:0", storage_backend="auto"):
     target_device = torch.device(device)
     ensure_safetensors_file(
         vae_path,
@@ -42,9 +43,15 @@ def _load_vae_direct(vae_path, device="cuda:0"):
         "Use VAELoader for other formats or TAE/pixel-space options.",
     )
 
-    vae_sd, metadata = load_safetensors_state_dict(vae_path, target_device)
+    vae_sd, metadata, backend_used, gds_used = load_safetensors_state_dict(
+        vae_path,
+        target_device,
+        storage_backend=storage_backend,
+    )
     logger.info(
-        "[DGX] VAE tensors on %s | cuda allocated: %.2f GB",
+        "[DGX] backend=%s gds=%s | VAE tensors on %s | cuda allocated: %.2f GB",
+        backend_used,
+        gds_used,
         target_device,
         torch.cuda.memory_allocated(target_device) / 1e9,
     )
@@ -58,7 +65,7 @@ def _load_vae_direct(vae_path, device="cuda:0"):
     vae.patcher.offload_device = target_device
     vae.throw_exception_if_invalid()
     comfy.model_management.load_models_gpu([vae.patcher], force_full_load=True)
-    return vae
+    return vae, backend_used, gds_used
 
 
 class VAELoaderDGX:
@@ -72,9 +79,13 @@ class VAELoaderDGX:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "vae_name": (folder_paths.get_filename_list("vae"),),
+                "vae_name": (
+                    folder_paths.get_filename_list("vae"),
+                    {"tooltip": "VAE file from ComfyUI's vae directory."},
+                ),
                 "dgx_mode": dgx_mode_input(),
-                "device": (cuda_device_list(), {"default": "cuda:0"}),
+                "device": cuda_device_input(),
+                "storage_backend": storage_backend_input(),
             }
         }
 
@@ -82,24 +93,33 @@ class VAELoaderDGX:
     FUNCTION = "load_vae"
     CATEGORY = "DGX Nodes"
 
-    def load_vae(self, vae_name, dgx_mode=True, device="cuda:0"):
+    def load_vae(self, vae_name, dgx_mode=True, device="cuda:0", storage_backend="auto"):
         with node_timer(
             logger,
             "VAELoaderDGX",
             vae_name=vae_name,
             dgx_mode=bool(dgx_mode),
             device=device,
+            storage_backend=storage_backend,
         ) as metrics:
             vae_path = folder_paths.get_full_path_or_raise("vae", vae_name)
             if not dgx_mode:
                 logger.info("[DGX] DGX mode disabled for VAE load, using stock pipeline.")
                 metrics["path"] = "stock"
+                metrics["backend_used"] = "stock"
+                metrics["gds_used"] = False
                 vae = _load_vae_stock(vae_path)
                 return (vae,)
 
             require_cuda_for_dgx_mode("VAELoaderDGX")
             metrics["path"] = "dgx"
-            vae = _load_vae_direct(vae_path, device=device)
+            vae, backend_used, gds_used = _load_vae_direct(
+                vae_path,
+                device=device,
+                storage_backend=storage_backend,
+            )
+            metrics["backend_used"] = backend_used
+            metrics["gds_used"] = gds_used
             return (vae,)
 
 

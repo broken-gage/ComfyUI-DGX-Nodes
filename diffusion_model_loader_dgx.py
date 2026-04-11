@@ -25,11 +25,12 @@ import torch
 
 from .performance_metrics import node_timer
 from .common import (
-    cuda_device_list,
+    cuda_device_input,
     dgx_mode_input,
     ensure_safetensors_file,
     load_safetensors_state_dict,
     require_cuda_for_dgx_mode,
+    storage_backend_input,
 )
 
 logger = logging.getLogger(__name__)
@@ -54,7 +55,13 @@ def _load_unet_stock(unet_path, weight_dtype="default"):
     )
 
 
-def _load_unet_direct(unet_path, weight_dtype="default", device="cuda:0", load_threads=1):
+def _load_unet_direct(
+    unet_path,
+    weight_dtype="default",
+    device="cuda:0",
+    load_threads=1,
+    storage_backend="auto",
+):
     target_device = torch.device(device)
     model_options = _model_options_from_weight_dtype(weight_dtype)
 
@@ -64,13 +71,16 @@ def _load_unet_direct(unet_path, weight_dtype="default", device="cuda:0", load_t
         "Use UNETLoader for other formats.",
     )
 
-    sd, metadata = load_safetensors_state_dict(
+    sd, metadata, backend_used, gds_used = load_safetensors_state_dict(
         unet_path,
         target_device,
         load_threads=load_threads,
+        storage_backend=storage_backend,
     )
     logger.info(
-        "[DGX] %d tensors on %s | cuda allocated: %.2f GB",
+        "[DGX] backend=%s gds=%s | %d tensors on %s | cuda allocated: %.2f GB",
+        backend_used,
+        gds_used,
         len(sd),
         target_device,
         torch.cuda.memory_allocated(target_device) / 1e9,
@@ -166,18 +176,26 @@ def _load_unet_direct(unet_path, weight_dtype="default", device="cuda:0", load_t
     comfy.model_management.load_models_gpu([model_patcher], force_full_load=True)
     model_patcher.cached_patcher_init = (
         _load_unet_model_only_direct,
-        (unet_path, weight_dtype, device, load_threads),
+        (unet_path, weight_dtype, device, load_threads, storage_backend),
     )
-    return model_patcher
+    return model_patcher, backend_used, gds_used
 
 
-def _load_unet_model_only_direct(unet_path, weight_dtype="default", device="cuda:0", load_threads=1):
-    return _load_unet_direct(
+def _load_unet_model_only_direct(
+    unet_path,
+    weight_dtype="default",
+    device="cuda:0",
+    load_threads=1,
+    storage_backend="auto",
+):
+    model, _backend_used, _gds_used = _load_unet_direct(
         unet_path,
         weight_dtype=weight_dtype,
         device=device,
         load_threads=load_threads,
+        storage_backend=storage_backend,
     )
+    return model
 
 
 class UNETLoaderDGX:
@@ -193,14 +211,30 @@ class UNETLoaderDGX:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "unet_name": (folder_paths.get_filename_list("diffusion_models"),),
+                "unet_name": (
+                    folder_paths.get_filename_list("diffusion_models"),
+                    {"tooltip": "Diffusion model / UNET file from ComfyUI's diffusion_models directory."},
+                ),
                 "weight_dtype": (
                     ["default", "fp8_e4m3fn", "fp8_e4m3fn_fast", "fp8_e5m2"],
-                    {"advanced": True},
+                    {
+                        "advanced": True,
+                        "tooltip": "Optional inference dtype override for the loaded diffusion model.",
+                    },
                 ),
                 "dgx_mode": dgx_mode_input(),
-                "device": (cuda_device_list(), {"default": "cuda:0"}),
-                "load_threads": ("INT", {"default": 1, "min": 1, "max": 4, "step": 1}),
+                "device": cuda_device_input(),
+                "load_threads": (
+                    "INT",
+                    {
+                        "default": 1,
+                        "min": 1,
+                        "max": 4,
+                        "step": 1,
+                        "tooltip": "Parallel loader threads used by the plain safetensors backend.",
+                    },
+                ),
+                "storage_backend": storage_backend_input(),
             }
         }
 
@@ -209,7 +243,15 @@ class UNETLoaderDGX:
     FUNCTION = "load_unet"
     CATEGORY = "DGX Nodes"
 
-    def load_unet(self, unet_name, weight_dtype, dgx_mode=True, device="cuda:0", load_threads=1):
+    def load_unet(
+        self,
+        unet_name,
+        weight_dtype,
+        dgx_mode=True,
+        device="cuda:0",
+        load_threads=1,
+        storage_backend="auto",
+    ):
         with node_timer(
             logger,
             "UNETLoaderDGX",
@@ -218,22 +260,28 @@ class UNETLoaderDGX:
             dgx_mode=bool(dgx_mode),
             device=device,
             load_threads=int(load_threads),
+            storage_backend=storage_backend,
         ) as metrics:
             unet_path = folder_paths.get_full_path_or_raise("diffusion_models", unet_name)
             if not dgx_mode:
                 logger.info("[DGX] DGX mode disabled for UNET load, using stock pipeline.")
                 metrics["path"] = "stock"
+                metrics["backend_used"] = "stock"
+                metrics["gds_used"] = False
                 model = _load_unet_stock(unet_path, weight_dtype=weight_dtype)
                 return (model, bool(dgx_mode))
 
             require_cuda_for_dgx_mode("UNETLoaderDGX")
             metrics["path"] = "dgx"
-            model = _load_unet_direct(
+            model, backend_used, gds_used = _load_unet_direct(
                 unet_path,
                 weight_dtype=weight_dtype,
                 device=device,
                 load_threads=load_threads,
+                storage_backend=storage_backend,
             )
+            metrics["backend_used"] = backend_used
+            metrics["gds_used"] = gds_used
             return (model, bool(dgx_mode))
 
 

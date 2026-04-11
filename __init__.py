@@ -10,6 +10,7 @@ Nodes included:
 - DualCLIPLoaderDGX
 - CLIPVisionLoaderDGX
 - VAELoaderDGX
+- UpscaleModelLoaderDGX
 """
 
 from .checkpoint_loader_unified_memory import CheckpointLoaderUnifiedMemory
@@ -17,6 +18,7 @@ from .clip_vision_loader_dgx import CLIPVisionLoaderDGX
 from .clip_loader_dgx import CLIPLoaderDGX
 from .dual_clip_loader_dgx import DualCLIPLoaderDGX
 from .diffusion_model_loader_dgx import UNETLoaderDGX
+from .upscale_model_loader_dgx import UpscaleModelLoaderDGX
 from .vae_loader_dgx import VAELoaderDGX
 
 NODE_CLASS_MAPPINGS = {
@@ -26,6 +28,7 @@ NODE_CLASS_MAPPINGS = {
     "DualCLIPLoaderDGX": DualCLIPLoaderDGX,
     "CLIPVisionLoaderDGX": CLIPVisionLoaderDGX,
     "VAELoaderDGX": VAELoaderDGX,
+    "UpscaleModelLoaderDGX": UpscaleModelLoaderDGX,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -35,8 +38,9 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "DualCLIPLoaderDGX": "Dual CLIP Loader (Unified Memory)",
     "CLIPVisionLoaderDGX": "CLIP Vision Loader (Unified Memory)",
     "VAELoaderDGX": "VAE Loader (Unified Memory)",
+    "UpscaleModelLoaderDGX": "Upscale Model Loader (Unified Memory)",
 }
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

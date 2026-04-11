@@ -16,7 +16,7 @@ import torch
 
 from .performance_metrics import node_timer
 from .common import (
-    cuda_device_list,
+    cuda_device_input,
     dgx_mode_input,
     ensure_safetensors_file,
     force_assign_core_model_patcher,
@@ -24,6 +24,7 @@ from .common import (
     load_safetensors_state_dict,
     normalize_clip_metadata_tensors,
     require_cuda_for_dgx_mode,
+    storage_backend_input,
 )
 
 logger = logging.getLogger(__name__)
@@ -70,23 +71,34 @@ def _load_clip_direct_from_paths(
     clip_type_name="stable_diffusion",
     device="cuda:0",
     node_name="CLIPLoaderDGX",
+    storage_backend="auto",
 ):
     target_device = torch.device(device)
     state_dicts = []
+    backend_used = None
+    gds_used = False
     for clip_path in clip_paths:
         ensure_safetensors_file(
             clip_path,
             node_name,
             "Use CLIPLoader for other formats.",
         )
-        clip_sd, metadata = load_safetensors_state_dict(clip_path, target_device)
+        clip_sd, metadata, clip_backend_used, clip_gds_used = load_safetensors_state_dict(
+            clip_path,
+            target_device,
+            storage_backend=storage_backend,
+        )
         clip_sd, metadata = comfy.utils.convert_old_quants(clip_sd, model_prefix="", metadata=metadata)
         state_dicts.append(normalize_clip_metadata_tensors(clip_sd))
+        backend_used = clip_backend_used
+        gds_used = gds_used or clip_gds_used
 
     model_options = gpu_text_encoder_model_options(target_device)
 
     logger.info(
-        "[DGX] CLIP tensors on %s | cuda allocated: %.2f GB",
+        "[DGX] backend=%s gds=%s | CLIP tensors on %s | cuda allocated: %.2f GB",
+        backend_used,
+        gds_used,
         target_device,
         torch.cuda.memory_allocated(target_device) / 1e9,
     )
@@ -102,26 +114,34 @@ def _load_clip_direct_from_paths(
     comfy.model_management.load_models_gpu([clip.patcher], force_full_load=True)
     clip.patcher.cached_patcher_init = (
         _load_clip_model_patcher_direct,
-        (tuple(clip_paths), clip_type_name, device),
+        (tuple(clip_paths), clip_type_name, device, storage_backend),
     )
-    return clip
+    return clip, backend_used, gds_used
 
 
-def _load_clip_direct(clip_path, clip_type_name="stable_diffusion", device="cuda:0"):
+def _load_clip_direct(clip_path, clip_type_name="stable_diffusion", device="cuda:0", storage_backend="auto"):
     return _load_clip_direct_from_paths(
         [clip_path],
         clip_type_name=clip_type_name,
         device=device,
         node_name="CLIPLoaderDGX",
+        storage_backend=storage_backend,
     )
 
 
-def _load_clip_model_patcher_direct(clip_paths, clip_type_name="stable_diffusion", device="cuda:0"):
-    return _load_clip_direct_from_paths(
+def _load_clip_model_patcher_direct(
+    clip_paths,
+    clip_type_name="stable_diffusion",
+    device="cuda:0",
+    storage_backend="auto",
+):
+    clip, _backend_used, _gds_used = _load_clip_direct_from_paths(
         list(clip_paths),
         clip_type_name=clip_type_name,
         device=device,
-    ).patcher
+        storage_backend=storage_backend,
+    )
+    return clip.patcher
 
 
 class CLIPLoaderDGX:
@@ -135,10 +155,14 @@ class CLIPLoaderDGX:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "clip_name": (folder_paths.get_filename_list("text_encoders"),),
-                "type": (CLIP_TYPES,),
+                "clip_name": (
+                    folder_paths.get_filename_list("text_encoders"),
+                    {"tooltip": "Text encoder file from ComfyUI's text_encoders directory."},
+                ),
+                "type": (CLIP_TYPES, {"tooltip": "Target CLIP family / model type used to construct the text encoder."}),
                 "dgx_mode": dgx_mode_input(),
-                "device": (cuda_device_list(), {"default": "cuda:0"}),
+                "device": cuda_device_input(),
+                "storage_backend": storage_backend_input(),
             }
         }
 
@@ -146,7 +170,7 @@ class CLIPLoaderDGX:
     FUNCTION = "load_clip"
     CATEGORY = "DGX Nodes"
 
-    def load_clip(self, clip_name, type="stable_diffusion", dgx_mode=True, device="cuda:0"):
+    def load_clip(self, clip_name, type="stable_diffusion", dgx_mode=True, device="cuda:0", storage_backend="auto"):
         with node_timer(
             logger,
             "CLIPLoaderDGX",
@@ -154,17 +178,27 @@ class CLIPLoaderDGX:
             clip_type=type,
             dgx_mode=bool(dgx_mode),
             device=device,
+            storage_backend=storage_backend,
         ) as metrics:
             clip_path = folder_paths.get_full_path_or_raise("text_encoders", clip_name)
             if not dgx_mode:
                 logger.info("[DGX] DGX mode disabled for CLIP load, using stock pipeline.")
                 metrics["path"] = "stock"
+                metrics["backend_used"] = "stock"
+                metrics["gds_used"] = False
                 clip = _load_clip_stock([clip_path], clip_type_name=type)
                 return (clip,)
 
             require_cuda_for_dgx_mode("CLIPLoaderDGX")
             metrics["path"] = "dgx"
-            clip = _load_clip_direct(clip_path, clip_type_name=type, device=device)
+            clip, backend_used, gds_used = _load_clip_direct(
+                clip_path,
+                clip_type_name=type,
+                device=device,
+                storage_backend=storage_backend,
+            )
+            metrics["backend_used"] = backend_used
+            metrics["gds_used"] = gds_used
             return (clip,)
 
 

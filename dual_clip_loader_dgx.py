@@ -12,7 +12,12 @@ import folder_paths
 
 from .performance_metrics import node_timer
 from .clip_loader_dgx import _load_clip_direct_from_paths, _load_clip_stock
-from .common import cuda_device_list, dgx_mode_input, require_cuda_for_dgx_mode
+from .common import (
+    cuda_device_input,
+    dgx_mode_input,
+    require_cuda_for_dgx_mode,
+    storage_backend_input,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,11 +48,18 @@ class DualCLIPLoaderDGX:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "clip_name1": (folder_paths.get_filename_list("text_encoders"),),
-                "clip_name2": (folder_paths.get_filename_list("text_encoders"),),
-                "type": (DUAL_CLIP_TYPES,),
+                "clip_name1": (
+                    folder_paths.get_filename_list("text_encoders"),
+                    {"tooltip": "First text encoder file from ComfyUI's text_encoders directory."},
+                ),
+                "clip_name2": (
+                    folder_paths.get_filename_list("text_encoders"),
+                    {"tooltip": "Second text encoder file from ComfyUI's text_encoders directory."},
+                ),
+                "type": (DUAL_CLIP_TYPES, {"tooltip": "Dual-encoder model family used to construct the combined CLIP object."}),
                 "dgx_mode": dgx_mode_input(),
-                "device": (cuda_device_list(), {"default": "cuda:0"}),
+                "device": cuda_device_input(),
+                "storage_backend": storage_backend_input(),
             }
         }
 
@@ -55,7 +67,15 @@ class DualCLIPLoaderDGX:
     FUNCTION = "load_clip"
     CATEGORY = "DGX Nodes"
 
-    def load_clip(self, clip_name1, clip_name2, type, dgx_mode=True, device="cuda:0"):
+    def load_clip(
+        self,
+        clip_name1,
+        clip_name2,
+        type,
+        dgx_mode=True,
+        device="cuda:0",
+        storage_backend="auto",
+    ):
         with node_timer(
             logger,
             "DualCLIPLoaderDGX",
@@ -64,6 +84,7 @@ class DualCLIPLoaderDGX:
             clip_type=type,
             dgx_mode=bool(dgx_mode),
             device=device,
+            storage_backend=storage_backend,
         ) as metrics:
             clip_path1 = folder_paths.get_full_path_or_raise("text_encoders", clip_name1)
             clip_path2 = folder_paths.get_full_path_or_raise("text_encoders", clip_name2)
@@ -72,17 +93,22 @@ class DualCLIPLoaderDGX:
             if not dgx_mode:
                 logger.info("[DGX] DGX mode disabled for dual CLIP load, using stock pipeline.")
                 metrics["path"] = "stock"
+                metrics["backend_used"] = "stock"
+                metrics["gds_used"] = False
                 clip = _load_clip_stock(clip_paths, clip_type_name=type)
                 return (clip,)
 
             require_cuda_for_dgx_mode("DualCLIPLoaderDGX")
             metrics["path"] = "dgx"
-            clip = _load_clip_direct_from_paths(
+            clip, backend_used, gds_used = _load_clip_direct_from_paths(
                 clip_paths,
                 clip_type_name=type,
                 device=device,
                 node_name="DualCLIPLoaderDGX",
+                storage_backend=storage_backend,
             )
+            metrics["backend_used"] = backend_used
+            metrics["gds_used"] = gds_used
             return (clip,)
 
 

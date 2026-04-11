@@ -15,13 +15,14 @@ import torch
 
 from .performance_metrics import node_timer
 from .common import (
-    cuda_device_list,
+    cuda_device_input,
     dgx_mode_input,
     ensure_safetensors_file,
     force_assign_core_model_patcher,
     force_text_encoder_devices,
     load_safetensors_state_dict,
     require_cuda_for_dgx_mode,
+    storage_backend_input,
 )
 
 logger = logging.getLogger(__name__)
@@ -34,7 +35,7 @@ def _load_clip_vision_stock(clip_path):
     return clip_vision
 
 
-def _load_clip_vision_direct(clip_path, device="cuda:0"):
+def _load_clip_vision_direct(clip_path, device="cuda:0", storage_backend="auto"):
     target_device = torch.device(device)
     ensure_safetensors_file(
         clip_path,
@@ -42,9 +43,15 @@ def _load_clip_vision_direct(clip_path, device="cuda:0"):
         "Use CLIPVisionLoader for other formats.",
     )
 
-    sd, _metadata = load_safetensors_state_dict(clip_path, target_device)
+    sd, _metadata, backend_used, gds_used = load_safetensors_state_dict(
+        clip_path,
+        target_device,
+        storage_backend=storage_backend,
+    )
     logger.info(
-        "[DGX] CLIP vision tensors on %s | cuda allocated: %.2f GB",
+        "[DGX] backend=%s gds=%s | CLIP vision tensors on %s | cuda allocated: %.2f GB",
+        backend_used,
+        gds_used,
         target_device,
         torch.cuda.memory_allocated(target_device) / 1e9,
     )
@@ -70,7 +77,7 @@ def _load_clip_vision_direct(clip_path, device="cuda:0"):
     clip_vision.patcher.offload_device = target_device
     clip_vision.dtype = comfy.model_management.text_encoder_dtype(target_device)
     comfy.model_management.load_models_gpu([clip_vision.patcher], force_full_load=True)
-    return clip_vision
+    return clip_vision, backend_used, gds_used
 
 
 class CLIPVisionLoaderDGX:
@@ -84,9 +91,13 @@ class CLIPVisionLoaderDGX:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "clip_name": (folder_paths.get_filename_list("clip_vision"),),
+                "clip_name": (
+                    folder_paths.get_filename_list("clip_vision"),
+                    {"tooltip": "CLIP vision file from ComfyUI's clip_vision directory."},
+                ),
                 "dgx_mode": dgx_mode_input(),
-                "device": (cuda_device_list(), {"default": "cuda:0"}),
+                "device": cuda_device_input(),
+                "storage_backend": storage_backend_input(),
             }
         }
 
@@ -94,24 +105,33 @@ class CLIPVisionLoaderDGX:
     FUNCTION = "load_clip"
     CATEGORY = "DGX Nodes"
 
-    def load_clip(self, clip_name, dgx_mode=True, device="cuda:0"):
+    def load_clip(self, clip_name, dgx_mode=True, device="cuda:0", storage_backend="auto"):
         with node_timer(
             logger,
             "CLIPVisionLoaderDGX",
             clip_name=clip_name,
             dgx_mode=bool(dgx_mode),
             device=device,
+            storage_backend=storage_backend,
         ) as metrics:
             clip_path = folder_paths.get_full_path_or_raise("clip_vision", clip_name)
             if not dgx_mode:
                 logger.info("[DGX] DGX mode disabled for CLIP vision load, using stock pipeline.")
                 metrics["path"] = "stock"
+                metrics["backend_used"] = "stock"
+                metrics["gds_used"] = False
                 clip_vision = _load_clip_vision_stock(clip_path)
                 return (clip_vision,)
 
             require_cuda_for_dgx_mode("CLIPVisionLoaderDGX")
             metrics["path"] = "dgx"
-            clip_vision = _load_clip_vision_direct(clip_path, device=device)
+            clip_vision, backend_used, gds_used = _load_clip_vision_direct(
+                clip_path,
+                device=device,
+                storage_backend=storage_backend,
+            )
+            metrics["backend_used"] = backend_used
+            metrics["gds_used"] = gds_used
             return (clip_vision,)
 
 

@@ -1,12 +1,15 @@
 [project]
 name = "dgx-gb10-nodes"
 description = "Experimental unified-memory-aware DGX Spark / GB10 loader nodes for ComfyUI"
-version = "1.0.0"
+version = "1.1.0"
 license = { file = "LICENSE" }
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "instanttensor",
+    "fastsafetensors",
     "safetensors>=0.4.0",
+    "spandrel",
 ]
 classifiers = [
     "Operating System :: Microsoft :: Windows",
