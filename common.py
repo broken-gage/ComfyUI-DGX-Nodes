@@ -27,9 +27,9 @@ CUDA_DEVICE_TOOLTIP = (
     "CUDA device used for the DGX direct-load path when DGX mode is enabled."
 )
 
-STORAGE_BACKEND_OPTIONS = ["auto", "instanttensor", "fastsafetensors", "safetensors"]
+STORAGE_BACKEND_OPTIONS = ["auto", "fastsafetensors", "instanttensor", "safetensors"]
 STORAGE_BACKEND_TOOLTIP = (
-    "auto: try instanttensor first, then fastsafetensors, then plain safetensors. "
+    "auto: try fastsafetensors first, then instanttensor, then plain safetensors. "
     "instanttensor: experimental work-in-progress CUDA safetensors path. "
     "fastsafetensors: high-performance CUDA safetensors path (currently no-GDS by default on GB10). "
     "safetensors: existing plain safetensors.safe_open(...) path."
@@ -198,6 +198,15 @@ def _load_with_plain_safetensors(path, target_device, load_threads=1):
     return state_dict, metadata, "safetensors", False
 
 
+def _loader_metadata_or_empty(handle):
+    try:
+        return handle.metadata() or {}
+    except TypeError:
+        if hasattr(handle, "file_metadata") and handle.file_metadata is None:
+            return {}
+        raise
+
+
 def _load_with_instanttensor(path, target_device):
     if instanttensor is None:
         raise RuntimeError("instanttensor is not installed in the active environment.")
@@ -211,7 +220,7 @@ def _load_with_instanttensor(path, target_device):
             device=str(target_device),
             load_now=True,
         ) as handle:
-            metadata = handle.metadata() or {}
+            metadata = _loader_metadata_or_empty(handle)
             for key in handle.keys():
                 state_dict[key] = handle.get_tensor(key).clone()
     return state_dict, metadata, "instanttensor", bool(use_gds)
@@ -254,7 +263,7 @@ def load_safetensors_state_dict(path, target_device, load_threads=1, storage_bac
         )
 
     if storage_backend == "auto":
-        backend_order = ["instanttensor", "fastsafetensors", "safetensors"]
+        backend_order = ["fastsafetensors", "instanttensor", "safetensors"]
     else:
         backend_order = [storage_backend]
 

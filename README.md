@@ -1,8 +1,8 @@
 # ComfyUI-DGX-Nodes
 
-Version: 1.1.0
+Version: 1.2.0
 
-Release Date: 2026-04-11
+Release Date: 2026-04-29
 
 
 ## Author
@@ -17,6 +17,20 @@ Author/Maintainer: Claude Code / CodeX
 Standalone DGX Spark / GB10 focused custom nodes for ComfyUI.
 
 This repo contains experimental unified-memory-aware loader nodes that can load checkpoints, UNETs, CLIP encoders, CLIP vision models, dual-CLIP pairs, VAEs, and upscaler models through a DGX-oriented direct-to-CUDA path. The same nodes also support a stock ComfyUI fallback path through the `dgx_mode` toggle.
+
+Version `1.2.0` adds:
+
+- package install folder renamed to `ComfyUI-DGX-Nodes`, with install-time cleanup for the legacy `dgx-gb10-nodes` folder
+- it is recommended to uninstall the previous version and perform a clean installation.
+- `instanttensor` is now implemented correctly. safer `instanttensor` metadata handling for safetensors files without metadata
+- `storage_backend=auto` now prioritizes `fastsafetensors`, then `instanttensor`, then plain `safetensors` as `instanttensor` is still experimental.
+- backend selector ordering aligned with the automatic backend priority
+
+The current backend order is:
+
+- `fastsafetensors`
+- `instanttensor`
+- plain `safetensors`
 
 Version `1.1.0` adds:
 
