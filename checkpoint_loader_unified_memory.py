@@ -43,6 +43,7 @@ from .common import (
     force_assign_core_model_patcher,
     gpu_text_encoder_model_options,
     load_safetensors_state_dict,
+    mark_patcher_as_loaded,
     normalize_clip_metadata_tensors,
     require_cuda_for_dgx_mode,
     storage_backend_input,
@@ -164,6 +165,10 @@ class CheckpointLoaderUnifiedMemory:
             )
             model_config.set_inference_dtype(unet_dtype, manual_cast_dtype)
 
+            # Skeleton on target_device: assign=True promotes the already-CUDA sd tensors
+            # directly into model parameters (no CPU staging copy).
+            # meta device is incompatible with comfy_cast_weights ops layers — kept on
+            # target_device to avoid NotImplementedError during inference.
             model = model_config.get_model(sd, prefix, device=target_device)
             model_patcher = comfy.model_patcher.ModelPatcher(
                 model,
@@ -171,6 +176,9 @@ class CheckpointLoaderUnifiedMemory:
                 offload_device=offload_device,
             )
 
+            # Move any metadata tensors (comfy_quant, spiece_model, etc.) to CPU before
+            # load_model_weights; ops.py reads them via .numpy() which requires CPU.
+            sd = normalize_clip_metadata_tensors(sd)
             model.load_model_weights(sd, prefix, assign=True)
 
             dm_devices = set(p.device.type for p in model.diffusion_model.parameters())
@@ -180,6 +188,10 @@ class CheckpointLoaderUnifiedMemory:
                 torch.cuda.memory_allocated(target_device) / 1e9,
             )
 
+            # Correct model_management tracking before load_models_gpu: assign=True bypasses
+            # ModelPatcher.load() so model_loaded_weight_memory stays 0 — without this,
+            # load_models_gpu would call free_memory() and unnecessarily evict other models.
+            mark_patcher_as_loaded(model_patcher, target_device)
             comfy.model_management.load_models_gpu([model_patcher], force_full_load=True)
 
             scaled_fp8_list = [
@@ -211,6 +223,7 @@ class CheckpointLoaderUnifiedMemory:
                 vae.patcher.load_device = target_device
                 vae.patcher.offload_device = target_device
                 vae.throw_exception_if_invalid()
+                mark_patcher_as_loaded(vae.patcher, target_device)
                 comfy.model_management.load_models_gpu([vae.patcher], force_full_load=True)
 
             clip = None
@@ -221,6 +234,9 @@ class CheckpointLoaderUnifiedMemory:
                     clip_sd = normalize_clip_metadata_tensors(clip_sd)
                     clip_params = comfy.utils.calculate_parameters(clip_sd)
                     with force_assign_core_model_patcher():
+                        # gpu_text_encoder_model_options uses initial_device=meta so the
+                        # CLIP skeleton has zero physical footprint and CLIP.__init__ does
+                        # NOT call load_models_gpu internally (meta != load_device).
                         clip = comfy.sd.CLIP(
                             clip_target,
                             embedding_directory=folder_paths.get_folder_paths("embeddings"),
@@ -229,6 +245,7 @@ class CheckpointLoaderUnifiedMemory:
                             state_dict=clip_sd,
                             model_options=gpu_text_encoder_model_options(target_device),
                         )
+                    mark_patcher_as_loaded(clip.patcher, target_device)
                     comfy.model_management.load_models_gpu([clip.patcher], force_full_load=True)
                 else:
                     logger.warning("[DGX] No CLIP/text encoder weights found in checkpoint.")

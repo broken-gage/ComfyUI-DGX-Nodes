@@ -21,6 +21,7 @@ from .common import (
     ensure_safetensors_file,
     force_assign_core_model_patcher,
     load_safetensors_state_dict,
+    mark_patcher_as_loaded,
     require_cuda_for_dgx_mode,
     storage_backend_input,
 )
@@ -64,6 +65,10 @@ def _load_vae_direct(vae_path, device="cuda:0", storage_backend="auto"):
     vae.patcher.load_device = target_device
     vae.patcher.offload_device = target_device
     vae.throw_exception_if_invalid()
+    # Correct model_management tracking before load_models_gpu: assign=True bypasses
+    # ModelPatcher.load() so model_loaded_weight_memory stays 0 — without this,
+    # load_models_gpu would call free_memory() and unnecessarily evict other models.
+    mark_patcher_as_loaded(vae.patcher, target_device)
     comfy.model_management.load_models_gpu([vae.patcher], force_full_load=True)
     return vae, backend_used, gds_used
 

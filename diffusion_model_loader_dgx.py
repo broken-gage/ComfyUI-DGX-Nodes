@@ -29,6 +29,8 @@ from .common import (
     dgx_mode_input,
     ensure_safetensors_file,
     load_safetensors_state_dict,
+    mark_patcher_as_loaded,
+    normalize_clip_metadata_tensors,
     require_cuda_for_dgx_mode,
     storage_backend_input,
 )
@@ -158,12 +160,20 @@ def _load_unet_direct(
     if model_options.get("fp8_optimizations", False):
         model_config.optimizations["fp8"] = True
 
+    # Skeleton on target_device: assign=True promotes the already-CUDA sd tensors
+    # directly into model parameters (no CPU staging copy).
+    # meta device was tried but is incompatible with comfy_cast_weights ops layers
+    # (manual_cast.Linear) which call cast_bias_weight -> cast_to -> r.copy_(weight)
+    # on the still-meta weight, causing NotImplementedError at inference time.
     model = model_config.get_model(new_sd, "", device=target_device)
     model_patcher = comfy.model_patcher.ModelPatcher(
         model,
         load_device=load_device,
         offload_device=offload_device,
     )
+    # Move any metadata tensors (comfy_quant, spiece_model, etc.) to CPU before
+    # load_model_weights; ops.py reads them via .numpy() which requires CPU.
+    new_sd = normalize_clip_metadata_tensors(new_sd)
     model.load_model_weights(new_sd, "", assign=True)
 
     dm_devices = set(param.device.type for param in model.diffusion_model.parameters())
@@ -173,6 +183,10 @@ def _load_unet_direct(
         torch.cuda.memory_allocated(target_device) / 1e9,
     )
 
+    # Correct model_management tracking before load_models_gpu: assign=True bypasses
+    # ModelPatcher.load() so model_loaded_weight_memory stays 0 — without this,
+    # load_models_gpu would call free_memory() and unnecessarily evict other models.
+    mark_patcher_as_loaded(model_patcher, target_device)
     comfy.model_management.load_models_gpu([model_patcher], force_full_load=True)
     model_patcher.cached_patcher_init = (
         _load_unet_model_only_direct,

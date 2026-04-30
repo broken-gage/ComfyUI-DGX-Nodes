@@ -27,12 +27,12 @@ CUDA_DEVICE_TOOLTIP = (
     "CUDA device used for the DGX direct-load path when DGX mode is enabled."
 )
 
-STORAGE_BACKEND_OPTIONS = ["auto", "fastsafetensors", "instanttensor", "safetensors"]
+STORAGE_BACKEND_OPTIONS = ["auto", "instanttensor", "safetensors", "fastsafetensors"]
 STORAGE_BACKEND_TOOLTIP = (
-    "auto: try fastsafetensors first, then instanttensor, then plain safetensors. "
-    "instanttensor: experimental work-in-progress CUDA safetensors path. "
-    "fastsafetensors: high-performance CUDA safetensors path (currently no-GDS by default on GB10). "
-    "safetensors: existing plain safetensors.safe_open(...) path."
+    "auto: try instanttensor first (1x memory), then plain safetensors (1x memory), then fastsafetensors (2x peak on unified memory due to host-mmap + CUDA copy). "
+    "instanttensor: experimental CUDA safetensors path; load_now=False for minimal peak memory on unified memory. "
+    "safetensors: plain safetensors.safe_open(...) path; reads directly into independent CUDA allocations. "
+    "fastsafetensors: host-mmap + CUDA DMA path; 2x peak physical memory on unified memory systems."
 )
 
 _CPU_ONLY_CLIP_SUFFIXES = (
@@ -213,15 +213,22 @@ def _load_with_instanttensor(path, target_device):
 
     use_gds = _probe_instanttensor_gds_available()
     state_dict = {}
+    # load_now=False: lazy per-tensor loading — each get_tensor() reads directly into
+    # an independent CUDA allocation with no pre-loaded internal buffer.
+    # This keeps peak physical memory at 1x on unified memory (no buffer+clones overlap).
     with _temporary_env("INSTANTTENSOR_USE_CUFILE", "1" if use_gds else "0"):
         with instanttensor.safe_open(
             path,
             framework="pt",
             device=str(target_device),
-            load_now=True,
+            load_now=False,
         ) as handle:
             metadata = _loader_metadata_or_empty(handle)
             for key in handle.keys():
+                # clone() is required: instanttensor tensors are backed by
+                # context-managed memory freed on exit. With load_now=False the
+                # clone covers one tensor at a time (not the whole model), so
+                # peak overhead is one tensor rather than 1× model size.
                 state_dict[key] = handle.get_tensor(key).clone()
     return state_dict, metadata, "instanttensor", bool(use_gds)
 
@@ -252,6 +259,15 @@ def _load_with_fastsafetensors(path, target_device):
         metadata = _extract_fastsafetensors_metadata(handle.metadata(), path)
         for key in handle.keys():
             state_dict[key] = handle.get_tensor(key).clone()
+        # fastsafe_open pre-allocates the entire file as a single CUDA buffer at init.
+        # get_tensor() returns views of that buffer; .clone() makes independent copies.
+        # The buffer (N GB) + accumulated clones (N GB) sit in CUDA simultaneously until
+        # __exit__ frees the buffer. Closing it here — right after all clones exist —
+        # shrinks the 2× window to just the clone loop instead of lingering until exit.
+        # fastsafe_open.__exit__ guards with `if self.fb:` so setting fb=None is safe.
+        if getattr(handle, "fb", None) is not None:
+            handle.fb.close()
+            handle.fb = None
     return state_dict, metadata, "fastsafetensors", False
 
 
@@ -263,7 +279,11 @@ def load_safetensors_state_dict(path, target_device, load_threads=1, storage_bac
         )
 
     if storage_backend == "auto":
-        backend_order = ["fastsafetensors", "instanttensor", "safetensors"]
+        # Prefer backends with 1x peak physical memory on unified memory systems.
+        # instanttensor (load_now=False): truly lazy, no internal buffer.
+        # safetensors: direct CUDA writes, small OS page-cache window only.
+        # fastsafetensors: host-mmap + CUDA DMA → 2x physical peak, last resort.
+        backend_order = ["instanttensor", "safetensors", "fastsafetensors"]
     else:
         backend_order = [storage_backend]
 
@@ -296,11 +316,20 @@ class AssignOnlyModelPatcher(comfy.model_patcher.ModelPatcher):
 
 @contextlib.contextmanager
 def force_assign_core_model_patcher():
+    # Always replace CoreModelPatcher with AssignOnlyModelPatcher, even when
+    # aimdo (dynamic VRAM) is active and has set CoreModelPatcher = ModelPatcherDynamic.
+    #
+    # Without this, CLIP and VAE get ModelPatcherDynamic patchers. Aimdo's
+    # ModelPatcherDynamic.partially_load() has no skip condition — it always
+    # calls load(), which allocates a ~1x model-size CUDA staging buffer and
+    # resets model_loaded_weight_memory to only the pre-loaded weights (~600 KB).
+    # This causes future model_memory_required() calls to return the full model
+    # size, triggering free_memory() that evicts other models (e.g. the UNet).
+    #
+    # AssignOnlyModelPatcher uses base ModelPatcher.partially_load() which
+    # respects mark_patcher_as_loaded()'s pre-set model_loaded_weight_memory,
+    # so the skip condition fires and no staging buffer is ever allocated.
     original = comfy.model_patcher.CoreModelPatcher
-    if original is not comfy.model_patcher.ModelPatcher:
-        yield
-        return
-
     comfy.model_patcher.CoreModelPatcher = AssignOnlyModelPatcher
     try:
         yield
@@ -327,10 +356,19 @@ def force_text_encoder_devices(target_device):
 
 
 def gpu_text_encoder_model_options(target_device):
+    # initial_device=meta: the text encoder skeleton is created with meta tensors
+    # (zero physical memory). assign=True in load_sd() then directly replaces them
+    # with the already-CUDA sd tensors — peak stays at 1x on unified memory.
+    #
+    # Side effect: meta != load_device, so CLIP.__init__ does NOT call
+    # load_models_gpu internally (condition: params['device'] == load_device is False).
+    # This prevents the spurious free_memory() call that was unnecessarily evicting
+    # other models when dynamic VRAM (aimdo) made loaded_size() report 0 before
+    # partially_load() had run.
     return {
         "load_device": target_device,
         "offload_device": target_device,
-        "initial_device": target_device,
+        "initial_device": torch.device("meta"),
     }
 
 
@@ -346,3 +384,20 @@ def normalize_clip_metadata_tensors(state_dict):
         else:
             normalized[key] = value
     return normalized
+
+
+def mark_patcher_as_loaded(patcher, device):
+    """Update model_management tracking state after assign=True weight loading.
+
+    load_model_weights(assign=True) puts weights directly on the target device
+    without going through ModelPatcher.load(), so model_loaded_weight_memory stays
+    at 0 and model.device stays at offload_device. load_models_gpu() reads these
+    fields before calling free_memory(): with stale values it thinks the full model
+    still needs to be loaded and unnecessarily evicts other models.
+
+    This corrects the counters so load_models_gpu sees model_memory_required=0 and
+    skips free_memory(). The subsequent ModelPatcher.load() / ModelPatcherDynamic.load()
+    call (inside load_models_gpu) will overwrite these values with its own tracking.
+    """
+    patcher.model.model_loaded_weight_memory = patcher.model_size()
+    patcher.model.device = device

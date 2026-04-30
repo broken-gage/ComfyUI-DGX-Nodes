@@ -22,6 +22,7 @@ from .common import (
     force_assign_core_model_patcher,
     gpu_text_encoder_model_options,
     load_safetensors_state_dict,
+    mark_patcher_as_loaded,
     normalize_clip_metadata_tensors,
     require_cuda_for_dgx_mode,
     storage_backend_input,
@@ -104,6 +105,9 @@ def _load_clip_direct_from_paths(
     )
 
     with force_assign_core_model_patcher():
+        # gpu_text_encoder_model_options uses initial_device=meta so the CLIP skeleton
+        # has zero physical footprint and CLIP.__init__ does NOT fire load_models_gpu
+        # internally (meta != load_device). The explicit call below is the only one.
         clip = comfy.sd.load_text_encoder_state_dicts(
             state_dicts=state_dicts,
             embedding_directory=folder_paths.get_folder_paths("embeddings"),
@@ -111,6 +115,11 @@ def _load_clip_direct_from_paths(
             model_options=model_options,
         )
 
+    # Correct model_management tracking: assign=True (via is_dynamic) bypasses
+    # ModelPatcher.load(), so model_loaded_weight_memory stays 0. Without this,
+    # load_models_gpu would see model_memory_required=full_size and call free_memory(),
+    # unnecessarily evicting other models already resident in unified memory.
+    mark_patcher_as_loaded(clip.patcher, target_device)
     comfy.model_management.load_models_gpu([clip.patcher], force_full_load=True)
     clip.patcher.cached_patcher_init = (
         _load_clip_model_patcher_direct,
