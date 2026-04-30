@@ -234,16 +234,16 @@ class CheckpointLoaderUnifiedMemory:
                     clip_sd = normalize_clip_metadata_tensors(clip_sd)
                     clip_params = comfy.utils.calculate_parameters(clip_sd)
                     with force_assign_core_model_patcher():
-                        # gpu_text_encoder_model_options uses initial_device=meta so the
-                        # CLIP skeleton has zero physical footprint and CLIP.__init__ does
-                        # NOT call load_models_gpu internally (meta != load_device).
+                        # gpu_text_encoder_model_options keeps regular CLIP on a meta
+                        # skeleton, but uses CUDA init for MixedPrecisionOps quantized
+                        # CLIP to avoid constructing meta-backed QuantizedTensors.
                         clip = comfy.sd.CLIP(
                             clip_target,
                             embedding_directory=folder_paths.get_folder_paths("embeddings"),
                             tokenizer_data=clip_sd,
                             parameters=clip_params,
                             state_dict=clip_sd,
-                            model_options=gpu_text_encoder_model_options(target_device),
+                            model_options=gpu_text_encoder_model_options(target_device, clip_sd),
                         )
                     mark_patcher_as_loaded(clip.patcher, target_device)
                     comfy.model_management.load_models_gpu([clip.patcher], force_full_load=True)

@@ -27,12 +27,12 @@ CUDA_DEVICE_TOOLTIP = (
     "CUDA device used for the DGX direct-load path when DGX mode is enabled."
 )
 
-STORAGE_BACKEND_OPTIONS = ["auto", "instanttensor", "safetensors", "fastsafetensors"]
+STORAGE_BACKEND_OPTIONS = ["auto", "instanttensor", "fastsafetensors", "safetensors"]
 STORAGE_BACKEND_TOOLTIP = (
-    "auto: try instanttensor first (1x memory), then plain safetensors (1x memory), then fastsafetensors (2x peak on unified memory due to host-mmap + CUDA copy). "
+    "auto: try instanttensor first (1x memory), then fastsafetensors, then plain safetensors. "
     "instanttensor: experimental CUDA safetensors path; load_now=False for minimal peak memory on unified memory. "
-    "safetensors: plain safetensors.safe_open(...) path; reads directly into independent CUDA allocations. "
-    "fastsafetensors: host-mmap + CUDA DMA path; 2x peak physical memory on unified memory systems."
+    "fastsafetensors: host-mmap + CUDA DMA path; 2x peak physical memory on unified memory systems. "
+    "safetensors: plain safetensors.safe_open(...) path; reads directly into independent CUDA allocations."
 )
 
 _CPU_ONLY_CLIP_SUFFIXES = (
@@ -279,11 +279,7 @@ def load_safetensors_state_dict(path, target_device, load_threads=1, storage_bac
         )
 
     if storage_backend == "auto":
-        # Prefer backends with 1x peak physical memory on unified memory systems.
-        # instanttensor (load_now=False): truly lazy, no internal buffer.
-        # safetensors: direct CUDA writes, small OS page-cache window only.
-        # fastsafetensors: host-mmap + CUDA DMA → 2x physical peak, last resort.
-        backend_order = ["instanttensor", "safetensors", "fastsafetensors"]
+        backend_order = ["instanttensor", "fastsafetensors", "safetensors"]
     else:
         backend_order = [storage_backend]
 
@@ -355,20 +351,28 @@ def force_text_encoder_devices(target_device):
         comfy.model_management.text_encoder_dtype = original_dtype
 
 
-def gpu_text_encoder_model_options(target_device):
-    # initial_device=meta: the text encoder skeleton is created with meta tensors
-    # (zero physical memory). assign=True in load_sd() then directly replaces them
-    # with the already-CUDA sd tensors — peak stays at 1x on unified memory.
+def clip_uses_mixed_precision_ops(state_dicts):
+    if state_dicts is None:
+        return False
+    if isinstance(state_dicts, dict):
+        state_dicts = [state_dicts]
+    return any(key.endswith(".comfy_quant") for state_dict in state_dicts for key in state_dict)
+
+
+def gpu_text_encoder_model_options(target_device, state_dicts=None):
+    # Prefer meta skeletons for regular CLIP weights: assign=True replaces them
+    # with already-CUDA sd tensors while avoiding CLIP.__init__'s eager load path.
     #
-    # Side effect: meta != load_device, so CLIP.__init__ does NOT call
-    # load_models_gpu internally (condition: params['device'] == load_device is False).
-    # This prevents the spurious free_memory() call that was unnecessarily evicting
-    # other models when dynamic VRAM (aimdo) made loaded_size() report 0 before
-    # partially_load() had run.
+    # MixedPrecisionOps quantized CLIP is different: its loader constructs a
+    # QuantizedTensor via weight.to(device=factory_device). With factory_device=meta,
+    # the quantized storage/scale tensors lose their data and fail at encode time.
+    # Build those skeletons on CUDA and leave the meta optimization to non-quantized
+    # text encoders.
+    initial_device = target_device if clip_uses_mixed_precision_ops(state_dicts) else torch.device("meta")
     return {
         "load_device": target_device,
         "offload_device": target_device,
-        "initial_device": torch.device("meta"),
+        "initial_device": initial_device,
     }
 
 

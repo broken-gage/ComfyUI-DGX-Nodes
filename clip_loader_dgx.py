@@ -94,7 +94,7 @@ def _load_clip_direct_from_paths(
         backend_used = clip_backend_used
         gds_used = gds_used or clip_gds_used
 
-    model_options = gpu_text_encoder_model_options(target_device)
+    model_options = gpu_text_encoder_model_options(target_device, state_dicts)
 
     logger.info(
         "[DGX] backend=%s gds=%s | CLIP tensors on %s | cuda allocated: %.2f GB",
@@ -105,9 +105,9 @@ def _load_clip_direct_from_paths(
     )
 
     with force_assign_core_model_patcher():
-        # gpu_text_encoder_model_options uses initial_device=meta so the CLIP skeleton
-        # has zero physical footprint and CLIP.__init__ does NOT fire load_models_gpu
-        # internally (meta != load_device). The explicit call below is the only one.
+        # gpu_text_encoder_model_options keeps regular CLIP on a meta skeleton,
+        # but uses CUDA init for MixedPrecisionOps quantized CLIP to avoid
+        # constructing meta-backed QuantizedTensors.
         clip = comfy.sd.load_text_encoder_state_dicts(
             state_dicts=state_dicts,
             embedding_directory=folder_paths.get_folder_paths("embeddings"),
