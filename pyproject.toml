@@ -1,7 +1,7 @@
 [project]
-name = "ComfyUI-DGX-Nodes"
+name = "dgx-gb10-nodes"
 description = "Experimental unified-memory-aware DGX Spark / GB10 loader nodes for ComfyUI"
-version = "1.2.0"
+version = "1.2.1"
 license = { file = "LICENSE" }
 readme = "README.md"
 requires-python = ">=3.10"

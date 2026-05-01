@@ -1,8 +1,8 @@
 # ComfyUI-DGX-Nodes
 
-Version: 1.2.0
+Version: 1.2.1
 
-Release Date: 2026-04-29
+Release Date: 2026-05-01
 
 
 ## Author
@@ -48,13 +48,17 @@ ComfyUI.
 
 ---
 
+## Version `1.2.1` updates:
+
+- Package metadata name reverted to `dgx-gb10-nodes` for Comfy Registry compatibility.
+- Removed the install-time legacy folder cleanup script that was only needed for the package name change.
+
 ## Version `1.2.0` updates:
 
 - Updated nodes to be compatible with the new ComfyUI dynamic VRAM.
-- Package install folder renamed to `ComfyUI-DGX-Nodes`, with install-time cleanup for the legacy `dgx-gb10-nodes` folder.
-- It is recommended to uninstall the previous version and perform a clean installation.
 - `instanttensor` is now implemented correctly, with safer `instanttensor` metadata handling for safetensors files without metadata.
 - Backend selector ordering aligned with the automatic backend priority.
+- Requires ComfyUI version `0.20.1` or newer, which supports dynamic VRAM. For ComfyUI versions before `0.20.0`, use node version `1.1.0`.
 
 ## Known Issue
 - With ComfyUI's dynamic VRAM implementation, the DGX node backends use more peak VRAM than native loading nodes (up to a 30% transient RAM usage increase in some cases).

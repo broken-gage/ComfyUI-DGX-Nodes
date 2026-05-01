@@ -41,6 +41,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "UpscaleModelLoaderDGX": "Upscale Model Loader (Unified Memory)",
 }
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
